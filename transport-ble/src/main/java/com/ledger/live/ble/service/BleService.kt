@@ -11,18 +11,20 @@ import com.ledger.live.ble.service.model.BleServiceEvent
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import timber.log.Timber
+import java.lang.ref.WeakReference
 
 @SuppressLint("MissingPermission")
 class BleService : Service() {
 
     //Service related
-    inner class LocalBinder : Binder() {
-        val service: BleService
-            get() = this@BleService
+    class LocalBinder(service: BleService) : Binder() {
+        private val serviceRef = WeakReference(service)
+
+        fun getService(): BleService? = serviceRef.get()
     }
 
     private var listenningJob: Job? = null
-    private val binder: IBinder = LocalBinder()
+    private val binder: IBinder = LocalBinder(this)
     var isBound = false
     override fun onBind(intent: Intent): IBinder {
         isBound = true

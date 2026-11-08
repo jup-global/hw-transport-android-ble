@@ -128,7 +128,7 @@ class BleManager internal constructor(
         val device = result.device
         val rssi = result.rssi
         val uuids = getServiceUUIDsList(result)
-        val name = device.name
+        val name = result.scanRecord?.deviceName ?: device.name
         val serviceId = uuids.first().toString()
 
         return if (name != null && uuids.isNotEmpty()) {
@@ -156,16 +156,26 @@ class BleManager internal constructor(
     /**
      * Use bleState for getting informations about running scan
      */
+    @Synchronized
     fun startScanning(): Boolean {
         return internalStartScanning()
     }
 
+    @Synchronized
     fun startScanning(
         onScanDevices: (List<BleDeviceModel>) -> Unit
     ): Boolean {
         Timber.d("Start Scanning")
         onScanDevicesCallback = onScanDevices
         return internalStartScanning()
+    }
+
+    @Synchronized
+    fun clearQueue() {
+        Timber.d("Clearing pending request queue.")
+        synchronized(pendingSendRequest) {
+            pendingSendRequest.clear()
+        }
     }
 
     /**
@@ -193,6 +203,20 @@ class BleManager internal constructor(
         filters.add(
             ScanFilter.Builder()
                 .setServiceUuid(ParcelUuid(UUID.fromString(STAX_SERVICE_UUID)))
+                .build(),
+        )
+
+        //Filter Flex service
+        filters.add(
+            ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(UUID.fromString(FLEX_SERVICE_UUID)))
+                .build(),
+        )
+
+        // Filter Apex service (Nano Gen5)
+        filters.add(
+            ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(UUID.fromString(APEX_SERVICE_UUID)))
                 .build(),
         )
 
@@ -228,6 +252,7 @@ class BleManager internal constructor(
         return true
     }
 
+    @Synchronized
     fun stopScanning() {
         Timber.d("Stop Scanning")
         pollingJob?.cancel()
@@ -290,8 +315,7 @@ class BleManager internal constructor(
         callback: BleManagerConnectionCallback? = null,
     ) {
         Timber.d("($this) - Try Connecting to device with address $address")
-        stopScanning()
-        internalDisconnect()
+        cleanupConnection()
 
         connectionCallback = callback
 
@@ -349,14 +373,7 @@ class BleManager internal constructor(
     fun disconnect() {
         Timber.d("Called disconnect")
 
-        if (disconnectingJob == null
-            || disconnectingJob?.isCancelled == true
-            || disconnectingJob?.isCompleted == true
-        ) {
-            disconnectingJob = scope.launch {
-                internalDisconnect()
-            }
-        }
+        cleanupConnection()
     }
 
     private var disconnectingDeferred: CompletableDeferred<Boolean>? = null
@@ -383,6 +400,7 @@ class BleManager internal constructor(
         }
     }
 
+    @Synchronized
     fun send(
         apduHex: String,
     ) {
@@ -392,6 +410,7 @@ class BleManager internal constructor(
     }
 
     private val pendingSendRequest = mutableListOf<BleManagerSendCallback>()
+    @Synchronized
     fun send(
         apduHex: String,
         onSuccess: (String) -> Unit,
@@ -412,6 +431,9 @@ class BleManager internal constructor(
 
     // Bluetooth Service lifecycle.
     private var bluetoothService: BleService? = null
+    private var serviceJob: Job? = null
+    private var serviceBound: Boolean = false
+
     private lateinit var connectedDevice: BleDeviceModel
     var isConnected: Boolean = false
         private set
@@ -419,15 +441,18 @@ class BleManager internal constructor(
     private val serviceConnection: ServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(componentName: ComponentName, service: IBinder) {
             Timber.d("Connected to BleService !")
-            bluetoothService = (service as BleService.LocalBinder).service
+            bluetoothService = (service as BleService.LocalBinder).getService()
+            serviceBound = true
+
             bluetoothService?.let { bleService ->
                 if (!bleService.initialize()) {
                     Timber.e("Unable to initialize Bluetooth")
                     connectionCallback?.onConnectionError(BleError.INITIALIZING_FAILED)
                     bleService.disconnectService(BleServiceEvent.BleDeviceDisconnected(BleError.INITIALIZING_FAILED))
                 } else {
+                    serviceJob?.cancel()
                     bleService.connect(connectedDevice.id)
-                    scope.launch {
+                    serviceJob = scope.launch {
                         bleService.listenEvents().collect { event ->
                             when (event) {
                                 is BleServiceEvent.BleDeviceConnected -> {
@@ -473,7 +498,47 @@ class BleManager internal constructor(
 
         override fun onServiceDisconnected(componentName: ComponentName) {
             Timber.d("BleService disconnected unexpectedly")
+            cleanupConnection(BleError.UNKNOWN)
         }
+    }
+
+    @Synchronized
+    private fun cleanupConnection(error: BleError? = null) {
+        if (!serviceBound && bluetoothService == null && !isConnected && !isScanning) {
+            return
+        }
+        Timber.d("Cleaning up BLE connection. Error: $error")
+
+        stopScanning()
+
+        serviceJob?.cancel()
+        serviceJob = null
+
+        if (serviceBound) {
+            try {
+                context.unbindService(serviceConnection)
+            } catch (e: Exception) {
+                Timber.w(e, "Error unbinding service.")
+            }
+        }
+
+        bluetoothService = null
+        serviceBound = false
+        isConnected = false
+
+        if (error != null) {
+            connectionCallback?.onConnectionError(error)
+            _bleEvents.tryEmit(BleEvent.Error.ConnectionError(error))
+        } else {
+            disconnectionCallback?.onDisconnectionSuccess()
+        }
+
+        connectionCallback = null
+        disconnectionCallback = null
+        pendingSendRequest.forEach { it.onError("Device disconnected") }
+        clearQueue()
+
+        _bleState.tryEmit(BleState.Disconnected(error))
     }
 
     private var tmpError: BleError? = null
@@ -520,6 +585,8 @@ class BleManager internal constructor(
     fun isBleSupported(): Boolean = context.packageManager.run { hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE) }
 
     companion object {
+        // IDs based on https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledgerjs/packages/devices/src/index.ts
+
         private const val SCAN_MATCH_TTL = 5000L
         private const val SCAN_THROTTLE_MS = 1000L
 
@@ -534,12 +601,25 @@ class BleManager internal constructor(
         const val staxWriteWithResponseCharacteristicUUID = "13d63400-2c97-6004-0002-4c6564676572"
         const val staxWriteWithoutResponseCharacteristicUUID =
             "13d63400-2c97-6004-0003-4c6564676572"
+
+        const val FLEX_SERVICE_UUID = "13d63400-2c97-3004-0000-4c6564676572"
+        const val flexNotifyCharacteristicUUID = "13d63400-2c97-3004-0001-4c6564676572"
+        const val flexWriteWithResponseCharacteristicUUID = "13d63400-2c97-3004-0002-4c6564676572"
+        val flexWriteWithoutResponseCharacteristicUUID = "13d63400-2c97-3004-0003-4c6564676572"
+
+        // Device model Apex (Nano Gen5)
+        const val APEX_SERVICE_UUID = "13d63400-2c97-8004-0000-4c6564676572"
+        const val apexNotifyCharacteristicUUID = "13d63400-2c97-8004-0001-4c6564676572"
+        const val apexWriteWithResponseCharacteristicUUID = "13d63400-2c97-8004-0002-4c6564676572"
+        val apexWriteWithoutResponseCharacteristicUUID = "13d63400-2c97-8004-0003-4c6564676572"
     }
 
     private fun String.toDeviceModel(): BleDevice =
         when {
             equals(NANO_X_SERVICE_UUID, ignoreCase = true) -> BleDevice.NANOX
             equals(STAX_SERVICE_UUID, ignoreCase = true) -> BleDevice.STAX
+            equals(FLEX_SERVICE_UUID, ignoreCase = true) -> BleDevice.FLEX
+            equals(APEX_SERVICE_UUID, ignoreCase = true) -> BleDevice.NANO_GEN5
             else -> { throw IllegalStateException("$this is not an known uuid")}
         }
 }
