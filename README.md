@@ -26,10 +26,20 @@ When integrating the library you have to authorize some permissions.
       <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
 ```
 
-### Import 
-```groovy
-implementation 'com.github.LedgerHQ:hw-transport-android-ble:VERSION'
+### Import
+Jupiter publishes this fork as `global.jupiter:ledger-transport-ble` to GitHub Packages
+(`https://maven.pkg.github.com/jup-global/hw-transport-android-ble`) and to AWS CodeArtifact
+(`jupiter/mobile`). The Kotlin package is still `com.ledger.live.ble`.
+
+```kotlin
+implementation("global.jupiter:ledger-transport-ble:VERSION")
 ```
+
+### Publishing
+Only CI publishes, from `main` (`.github/workflows/publish.yml`). To release, raise
+`versionName` in `transport-ble/build.gradle` in a PR and merge it. The workflow publishes that
+version to GitHub Packages, then CodeArtifact. It fails before uploading if the version already
+exists in either. To re-run a release by hand, use "Run workflow" on `main`.
 
 ## Usage
 The `bletransportsample` application is the best way to see `transport-ble` in action. 
