@@ -80,8 +80,8 @@ dependencies {
 publishing {
     publications {
         release(MavenPublication) {
-            groupId = 'com.ledger.live'
-            artifactId = 'android-transport-ble'
+            groupId = 'global.jupiter'
+            artifactId = 'ledger-transport-ble'
             version = android.defaultConfig.versionName
 
             afterEvaluate {
@@ -93,12 +93,18 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/jup-ag/hw-transport-android-ble")
-
-            // Credentials for authentication with GitHub Packages
+            url = uri("https://maven.pkg.github.com/jup-global/hw-transport-android-ble")
             credentials {
-                username = "GITHUB_ACTOR"
-                password = ""
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
+        maven {
+            name = "CodeArtifact"
+            url = uri("https://jupiter-798327113560.d.codeartifact.us-west-2.amazonaws.com/maven/mobile/")
+            credentials {
+                username = "aws"
+                password = System.getenv("CODEARTIFACT_AUTH_TOKEN")
             }
         }
     }

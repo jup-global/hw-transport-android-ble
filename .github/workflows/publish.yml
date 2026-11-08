@@ -1,0 +1,130 @@
+name: Publish transport-ble
+
+on:
+  push:
+    branches: [main]
+    paths: [transport-ble/build.gradle]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  GROUP_PATH: global/jupiter
+  ARTIFACT: ledger-transport-ble
+  GITHUB_PACKAGES_URL: https://maven.pkg.github.com/jup-global/hw-transport-android-ble
+  CODEARTIFACT_URL: https://jupiter-798327113560.d.codeartifact.us-west-2.amazonaws.com/maven/mobile
+
+jobs:
+  version:
+    if: github.repository == 'jup-global/hw-transport-android-ble' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      publish: ${{ steps.read.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the library version
+        id: read
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          version_at() {
+            git show "$1:transport-ble/build.gradle" | sed -nE 's/^[[:space:]]*versionName[[:space:]]+"([^"]+)".*/\1/p'
+          }
+          version="$(version_at HEAD)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::versionName '$version' in transport-ble/build.gradle is not MAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          publish=true
+          if [[ "$EVENT" == "push" ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+            && [[ "$(version_at "$BEFORE")" == "$version" ]]; then
+            publish=false
+            echo "::notice::versionName is still $version; nothing to publish."
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: version
+    if: needs.version.outputs.publish == 'true' && github.repository == 'jup-global/hw-transport-android-ble' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Sign in to AWS for CodeArtifact
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: arn:aws:iam::798327113560:role/ci-hw-transport-android-ble
+          aws-region: us-west-2
+      - name: Get a CodeArtifact token
+        id: codeartifact
+        run: |
+          token="$(aws codeartifact get-authorization-token --domain jupiter --domain-owner 798327113560 \
+            --region us-west-2 --query authorizationToken --output text)"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - name: Check the version is new in both registries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CODEARTIFACT_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token }}
+        run: |
+          pom="$GROUP_PATH/$ARTIFACT/$VERSION/$ARTIFACT-$VERSION.pom"
+          check() {
+            local name="$1" url="$2" credentials="$3" status
+            status="$(curl -sS -o /dev/null -w '%{http_code}' -I -u "$credentials" "$url/$pom")"
+            if [[ "$status" == "404" ]]; then
+              echo "$name: global.jupiter:$ARTIFACT:$VERSION is new."
+            elif [[ "$status" -lt 400 ]]; then
+              echo "::error::global.jupiter:$ARTIFACT:$VERSION already exists in $name. Bump versionName in transport-ble/build.gradle."
+              return 1
+            else
+              echo "::error::Checking $name returned HTTP $status."
+              return 1
+            fi
+          }
+          failed=0
+          check "GitHub Packages" "$GITHUB_PACKAGES_URL" "$GITHUB_ACTOR:$GITHUB_TOKEN" || failed=1
+          check "CodeArtifact" "$CODEARTIFACT_URL" "aws:$CODEARTIFACT_AUTH_TOKEN" || failed=1
+          exit "$failed"
+      - name: Build the AAR
+        run: ./gradlew --no-daemon --stacktrace :transport-ble:assembleRelease
+      - name: Publish to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./gradlew --no-daemon --stacktrace :transport-ble:publishReleasePublicationToGitHubPackagesRepository
+      - name: Publish to CodeArtifact
+        env:
+          CODEARTIFACT_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token }}
+        run: ./gradlew --no-daemon --stacktrace :transport-ble:publishReleasePublicationToCodeArtifactRepository
+      - name: Summary
+        run: |
+          {
+            echo "Published \`global.jupiter:$ARTIFACT:$VERSION\` to:"
+            echo "- GitHub Packages: $GITHUB_PACKAGES_URL"
+            echo "- CodeArtifact: $CODEARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
