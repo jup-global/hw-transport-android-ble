@@ -1,11 +1,5 @@
 name: Publish transport-ble
 
-# Publishes global.jupiter:ledger-transport-ble to GitHub Packages and AWS
-# CodeArtifact. The version is versionName in transport-ble/build.gradle.
-# A push to main that changes it publishes; workflow_dispatch on main
-# publishes the current one. Both fail if the version exists in either
-# registry, before anything is uploaded.
-
 on:
   push:
     branches: [main]
@@ -34,7 +28,7 @@ jobs:
       version: ${{ steps.read.outputs.version }}
       publish: ${{ steps.read.outputs.publish }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -73,28 +67,31 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
         with:
           distribution: temurin
           java-version: '17'
       - name: Sign in to AWS for CodeArtifact
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
           role-to-assume: arn:aws:iam::798327113560:role/ci-hw-transport-android-ble
           aws-region: us-west-2
       - name: Get a CodeArtifact token
+        id: codeartifact
         run: |
           token="$(aws codeartifact get-authorization-token --domain jupiter --domain-owner 798327113560 \
             --region us-west-2 --query authorizationToken --output text)"
           echo "::add-mask::$token"
-          echo "CODEARTIFACT_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
       - name: Check the version is new in both registries
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODEARTIFACT_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
           pom="$GROUP_PATH/$ARTIFACT/$VERSION/$ARTIFACT-$VERSION.pom"
           check() {
@@ -121,6 +118,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./gradlew --no-daemon --stacktrace :transport-ble:publishReleasePublicationToGitHubPackagesRepository
       - name: Publish to CodeArtifact
+        env:
+          CODEARTIFACT_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: ./gradlew --no-daemon --stacktrace :transport-ble:publishReleasePublicationToCodeArtifactRepository
       - name: Summary
         run: |

@@ -77,7 +77,6 @@ dependencies {
 }
 
 // --- MAVEN PUBLISHING CONFIGURATION ---
-// CI publishes every version to both repositories (.github/workflows/publish.yml).
 publishing {
     publications {
         release(MavenPublication) {
